@@ -6,6 +6,7 @@
   <title>Budget Statement Analyzer</title>
   <link rel="stylesheet" href="styles.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.min.js"></script>
+  <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
   <div class="page-shell">
@@ -14,8 +15,8 @@
         <p class="eyebrow">Money clarity from a CSV</p>
         <h1>Upload your bank statement and get a spending breakdown.</h1>
         <p class="hero-text">
-          Drop in a CSV export from your bank, and the app will estimate income, spending, savings,
-          category totals, top merchants, and a clean transaction summary.
+          Drop in a CSV export, text-based PDF, or scanned bank statement, and the app will estimate
+          income, spending, savings, category totals, top merchants, and a clean transaction summary.
         </p>
       </div>
       <div class="hero-card">
@@ -39,7 +40,7 @@
         <label class="upload-zone" for="statement-file">
           <input id="statement-file" type="file" accept=".csv,text/csv,.pdf,application/pdf">
           <span class="upload-title">Choose a CSV or PDF statement</span>
-          <span class="upload-subtitle">or drag one here from your bank downloads</span>
+          <span class="upload-subtitle">Scanned PDFs are supported too, but OCR will take longer</span>
         </label>
 
         <div class="divider"><span>or paste CSV</span></div>

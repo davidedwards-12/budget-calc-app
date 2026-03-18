@@ -42,7 +42,12 @@ const els = {
 };
 
 const PDF_DATE_PATTERN = /\b(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b/;
-const PDF_AMOUNT_PATTERN = /-?\$?\(?\d[\d,]*\.\d{2}\)?/g;
+const PDF_AMOUNT_PATTERN = /-?\$?\(?\d[\d,\s]*\.\d{2}\)?/g;
+const OCR_CONFIG = {
+  workerPath: "https://unpkg.com/tesseract.js@5/dist/worker.min.js",
+  corePath: "https://unpkg.com/tesseract.js-core@5/tesseract-core.wasm.js",
+  langPath: "https://tessdata.projectnaptha.com/4.0.0_best"
+};
 
 bindEvents();
 
@@ -69,7 +74,7 @@ function bindEvents() {
   els.uploadZone.addEventListener("drop", (event) => {
     const [file] = event.dataTransfer.files;
     if (file) {
-      readFile(file);
+      void readFile(file);
     }
   });
 }
@@ -77,13 +82,13 @@ function bindEvents() {
 function handleFileImport(event) {
   const [file] = event.target.files;
   if (file) {
-    readFile(file);
+    void readFile(file);
   }
 }
 
-function readFile(file) {
-  if (file.name.toLowerCase().endsWith(".pdf") || file.type === "application/pdf") {
-    readPdf(file);
+async function readFile(file) {
+  if (await isPdfFile(file)) {
+    await readPdf(file);
     return;
   }
 
@@ -100,21 +105,49 @@ function readFile(file) {
 }
 
 async function readPdf(file) {
+  els.textInput.value = "";
   setStatus(`Reading ${file.name}... extracting transactions from the PDF.`);
 
   try {
-    const pdfText = await extractPdfText(file);
-    const csvText = pdfTextToCsv(pdfText);
+    const pdf = await loadPdfDocument(file);
+    const extractedText = await extractPdfTextFromDocument(pdf);
+    let csvText = pdfTextToCsv(extractedText);
 
     if (!csvText) {
-      setStatus("I could read the PDF, but I could not confidently find transaction rows. Try a CSV export if your bank offers one.");
-      return;
+      setStatus(`Reading ${file.name}... no usable embedded text found, switching to OCR.`);
+      const ocrText = await extractPdfTextWithOcr(pdf);
+      csvText = pdfTextToCsv(ocrText);
+
+      if (!csvText) {
+        const extractionIssue = detectPdfExtractionIssue(ocrText, true);
+        setStatus(extractionIssue || "I ran OCR on the PDF, but I still could not confidently find transaction rows. We may need to tune the ECU-specific parser next.");
+        return;
+      }
     }
 
     els.textInput.value = csvText;
     analyzeStatement(csvText);
   } catch (error) {
+    els.textInput.value = "";
     setStatus(`Could not read that PDF. ${error.message}`);
+  }
+}
+
+async function isPdfFile(file) {
+  const normalizedName = file.name.toLowerCase();
+  const normalizedType = (file.type || "").toLowerCase();
+
+  if (normalizedName.endsWith(".pdf") || normalizedType === "application/pdf") {
+    return true;
+  }
+
+  try {
+    const headerBuffer = await file.slice(0, 5).arrayBuffer();
+    const headerBytes = new Uint8Array(headerBuffer);
+    const headerText = String.fromCharCode(...headerBytes);
+    return headerText === "%PDF-";
+  } catch (_error) {
+    return false;
   }
 }
 
@@ -186,7 +219,7 @@ function analyzeStatement(csvText) {
   setStatus(`Analyzed ${transactions.length} transaction${transactions.length === 1 ? "" : "s"}.${skippedMessage}`);
 }
 
-async function extractPdfText(file) {
+async function loadPdfDocument(file) {
   const pdfjsLib = window.pdfjsLib;
 
   if (!pdfjsLib) {
@@ -197,7 +230,10 @@ async function extractPdfText(file) {
 
   const buffer = await file.arrayBuffer();
   const documentTask = pdfjsLib.getDocument({ data: buffer });
-  const pdf = await documentTask.promise;
+  return documentTask.promise;
+}
+
+async function extractPdfTextFromDocument(pdf) {
   const pages = [];
 
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
@@ -208,6 +244,61 @@ async function extractPdfText(file) {
   }
 
   return pages.join("\n");
+}
+
+async function extractPdfTextWithOcr(pdf) {
+  const Tesseract = window.Tesseract;
+
+  if (!Tesseract || typeof Tesseract.createWorker !== "function") {
+    throw new Error("OCR support did not load. Refresh the page and try again.");
+  }
+
+  const worker = await Tesseract.createWorker("eng", 1, OCR_CONFIG);
+  const pages = [];
+
+  try {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      setStatus(`Running OCR on page ${pageNumber} of ${pdf.numPages}... this can take a minute for scanned statements.`);
+      const page = await pdf.getPage(pageNumber);
+      const canvas = await renderPdfPageToCanvas(page, 2);
+      const {
+        data: { lines, text }
+      } = await worker.recognize(canvas);
+
+      const pageLines = Array.isArray(lines) && lines.length
+        ? lines.map((line) => normalizeOcrLine(line.text)).filter(Boolean)
+        : String(text || "")
+          .split("\n")
+          .map((line) => normalizeOcrLine(line))
+          .filter(Boolean);
+
+      pages.push(pageLines.join("\n"));
+    }
+  } finally {
+    await worker.terminate();
+  }
+
+  return pages.join("\n");
+}
+
+async function renderPdfPageToCanvas(page, scale) {
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+
+  if (!context) {
+    throw new Error("Could not create a canvas for OCR.");
+  }
+
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+
+  await page.render({
+    canvasContext: context,
+    viewport
+  }).promise;
+
+  return canvas;
 }
 
 function groupPdfItemsIntoLines(items) {
@@ -239,6 +330,47 @@ function groupPdfItemsIntoLines(items) {
     .filter(Boolean);
 }
 
+function normalizeOcrLine(line) {
+  return String(line || "")
+    .replace(/[“”]/g, "\"")
+    .replace(/[‘’]/g, "'")
+    .replace(/[—–]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function detectPdfExtractionIssue(pdfText, fromOcr = false) {
+  const trimmed = pdfText.trim();
+
+  if (!trimmed) {
+    return fromOcr
+      ? "I ran OCR on the scanned PDF, but still could not pull readable transaction text from it."
+      : "This PDF looks like a scanned or image-only statement, so the browser could not extract text from it. OCR is required for this file.";
+  }
+
+  const lines = trimmed.split("\n").map((line) => line.trim()).filter(Boolean);
+  const suspiciousLineCount = lines.filter((line) =>
+    /^(%PDF-|xref|trailer|startxref|endobj|obj\b|stream\b|endstream\b)/i.test(line) ||
+    /\/Type\/|\/Subtype\/|\/Filter\/|\/Length\b/.test(line)
+  ).length;
+
+  if (suspiciousLineCount >= 5) {
+    return "This file looks like raw PDF internals instead of statement text. The statement is likely scanned or otherwise not text-extractable. Try a CSV export, or an OCR-processed PDF.";
+  }
+
+  const transactionLikeLines = lines.filter((line) =>
+    PDF_DATE_PATTERN.test(line) && (line.match(PDF_AMOUNT_PATTERN) || []).length
+  ).length;
+
+  if (!transactionLikeLines && lines.length > 20) {
+    return fromOcr
+      ? "I ran OCR on the PDF, but the text still does not look like transaction rows. The ECU layout may need bank-specific tuning."
+      : "I could read some text from the PDF, but it does not look like transaction rows. This usually means the statement is scanned, image-heavy, or uses a layout this parser cannot read yet.";
+  }
+
+  return "";
+}
+
 function pdfTextToCsv(pdfText) {
   const lines = pdfText
     .split("\n")
@@ -265,12 +397,14 @@ function pdfTextToCsv(pdfText) {
 }
 
 function parsePdfTransactionLine(line) {
-  if (!PDF_DATE_PATTERN.test(line)) {
+  const normalizedLine = normalizePotentialTransactionLine(line);
+
+  if (!PDF_DATE_PATTERN.test(normalizedLine)) {
     return null;
   }
 
-  const dateMatch = line.match(PDF_DATE_PATTERN);
-  const amountMatches = [...line.matchAll(PDF_AMOUNT_PATTERN)];
+  const dateMatch = normalizedLine.match(PDF_DATE_PATTERN);
+  const amountMatches = [...normalizedLine.matchAll(PDF_AMOUNT_PATTERN)];
 
   if (!dateMatch || !amountMatches.length) {
     return null;
@@ -284,21 +418,32 @@ function parsePdfTransactionLine(line) {
     return null;
   }
 
-  const description = line
+  const cleanedDescription = normalizedLine
     .replace(dateMatch[0], "")
     .replace(amountToken, "")
     .replace(/\s+/g, " ")
     .trim();
 
-  if (!description || description.length < 2) {
+  if (!cleanedDescription || cleanedDescription.length < 2) {
     return null;
   }
 
-  if (looksLikeNonTransaction(description)) {
+  if (looksLikeNonTransaction(cleanedDescription)) {
     return null;
   }
 
-  return { date, description, amount };
+  return { date, description: cleanedDescription, amount };
+}
+
+function normalizePotentialTransactionLine(line) {
+  return String(line || "")
+    .replace(/[“”]/g, "\"")
+    .replace(/[‘’]/g, "'")
+    .replace(/[—–]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/\$\s+/g, "$")
+    .replace(/(?<=\d),(?=\s+\d{3}\b)/g, "")
+    .trim();
 }
 
 function normalizePdfDate(dateText) {
@@ -469,6 +614,7 @@ function numericValue(text) {
   const sanitized = text
     .replace(/\$/g, "")
     .replace(/,/g, "")
+    .replace(/\s+/g, "")
     .replace(/\(([^)]+)\)/, "-$1")
     .trim();
 

@@ -36,16 +36,16 @@ Date,Merchant,Debit,Credit
 
 ## PDF support
 
-The app can also read many text-based PDF statements directly in the browser.
+The app can read both text-based PDF statements and many scanned/image-based statements directly in the browser.
 
 It works best when:
 
 - each transaction is printed on a single line
 - the line includes a date near the start
 - the amount appears near the end of the line
-- the PDF contains selectable text, not just scanned images
+- the PDF contains selectable text, or at least clear, high-contrast scanned text
 
-If your bank provides image-only scanned PDFs, this version will usually need a CSV export instead.
+For scanned PDFs, the app now falls back to OCR automatically. That path is slower than normal text extraction, and some statement layouts may still need bank-specific tuning.
 
 ## How to run it
 
@@ -63,7 +63,7 @@ Then open `http://localhost:8000`.
 
 - `index.html`: app structure
 - `styles.css`: visual design and responsive layout
-- `app.js`: CSV parsing, browser-side PDF text extraction, transaction cleanup, category inference, and summary calculations
+- `app.js`: CSV parsing, browser-side PDF text extraction, OCR fallback for scanned PDFs, transaction cleanup, category inference, and summary calculations
 
 ## Notes
 
@@ -71,3 +71,4 @@ Then open `http://localhost:8000`.
 - Savings is currently estimated from transactions that look like transfers to savings accounts.
 - Net cash flow is calculated as `income - spending - savings transfers`.
 - PDF parsing is heuristic-based, so some statement layouts may need follow-up tuning once you test with real files.
+- OCR runs fully in the browser, so large scanned statements can take a while to process.
