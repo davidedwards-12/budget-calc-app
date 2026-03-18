@@ -44,7 +44,7 @@ const els = {
 const PDF_DATE_PATTERN = /\b(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b/;
 const PDF_AMOUNT_PATTERN = /-?\$?\(?\d[\d,\s]*\.\d{2}\)?/g;
 const OCR_CONFIG = {
-  workerPath: "https://unpkg.com/tesseract.js@5/dist/worker.min.js",
+  workerPath: "vendor/tesseract.worker.min.js",
   corePath: "https://unpkg.com/tesseract.js-core@5/tesseract-core.wasm.js",
   langPath: "https://tessdata.projectnaptha.com/4.0.0_best"
 };
@@ -226,7 +226,7 @@ async function loadPdfDocument(file) {
     throw new Error("PDF support did not load. Refresh the page and try again.");
   }
 
-  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.worker.min.js";
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 
   const buffer = await file.arrayBuffer();
   const documentTask = pdfjsLib.getDocument({ data: buffer });
