@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Budget Statement Analyzer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Money clarity from a CSV</p>
+        <h1>Upload your bank statement and get a spending breakdown.</h1>
+        <p class="hero-text">
+          Drop in a CSV export from your bank, and the app will estimate income, spending, savings,
+          category totals, top merchants, and a clean transaction summary.
+        </p>
+      </div>
+      <div class="hero-card">
+        <p class="card-label">Works best with columns like</p>
+        <ul class="format-list">
+          <li><code>Date</code></li>
+          <li><code>Description</code> or <code>Merchant</code></li>
+          <li><code>Amount</code> or separate <code>Debit</code>/<code>Credit</code></li>
+        </ul>
+      </div>
+    </header>
+
+    <main class="main-grid">
+      <section class="panel input-panel">
+        <div class="panel-header">
+          <h2>Import Statement</h2>
+          <button id="load-sample" class="ghost-button" type="button">Load sample data</button>
+        </div>
+
+        <label class="upload-zone" for="statement-file">
+          <input id="statement-file" type="file" accept=".csv,text/csv">
+          <span class="upload-title">Choose a CSV file</span>
+          <span class="upload-subtitle">or drag one here from your bank downloads</span>
+        </label>
+
+        <div class="divider"><span>or paste CSV</span></div>
+
+        <label class="field-label" for="statement-text">Statement data</label>
+        <textarea id="statement-text" rows="10" placeholder="Date,Description,Amount&#10;2026-03-01,Payroll Deposit,2400.00&#10;2026-03-02,Trader Joe's,-82.14"></textarea>
+
+        <div class="actions">
+          <button id="analyze-button" class="primary-button" type="button">Analyze statement</button>
+          <button id="clear-button" class="secondary-button" type="button">Clear</button>
+        </div>
+
+        <div id="status-message" class="status-message" aria-live="polite">
+          Upload or paste a statement to begin.
+        </div>
+      </section>
+
+      <section class="panel summary-panel">
+        <div class="panel-header">
+          <h2>Summary</h2>
+          <p id="summary-range" class="panel-meta">No statement loaded yet</p>
+        </div>
+
+        <div id="summary-cards" class="summary-cards empty-state">
+          <p>Your totals will appear here after import.</p>
+        </div>
+
+        <div class="charts-grid">
+          <div class="chart-card">
+            <div class="panel-header">
+              <h3>Spending by category</h3>
+            </div>
+            <div id="category-breakdown" class="breakdown empty-state">
+              <p>No spending categories yet.</p>
+            </div>
+          </div>
+
+          <div class="chart-card">
+            <div class="panel-header">
+              <h3>Top merchants</h3>
+            </div>
+            <div id="merchant-breakdown" class="breakdown empty-state">
+              <p>No merchant totals yet.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <section class="panel table-panel">
+      <div class="panel-header">
+        <h2>Transactions</h2>
+        <p id="transaction-count" class="panel-meta">0 transactions</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Description</th>
+              <th>Category</th>
+              <th>Type</th>
+              <th>Amount</th>
+            </tr>
+          </thead>
+          <tbody id="transactions-body">
+            <tr>
+              <td colspan="5" class="table-empty">No statement imported yet.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
