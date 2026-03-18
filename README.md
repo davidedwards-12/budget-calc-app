@@ -1,10 +1,11 @@
 # Budget Statement Analyzer
 
-A lightweight browser app for importing bank-statement CSV files and turning them into a quick money summary.
+A lightweight browser app for importing bank-statement CSV or PDF files and turning them into a quick money summary.
 
 ## What it does
 
 - Upload or paste a bank statement CSV.
+- Upload a PDF statement and extract likely transaction rows in the browser.
 - Detect common columns like `Date`, `Description` or `Merchant`, and `Amount` or `Debit`/`Credit`.
 - Estimate:
   - total income
@@ -33,6 +34,19 @@ Date,Merchant,Debit,Credit
 2026-03-02,Trader Joe's,84.12,
 ```
 
+## PDF support
+
+The app can also read many text-based PDF statements directly in the browser.
+
+It works best when:
+
+- each transaction is printed on a single line
+- the line includes a date near the start
+- the amount appears near the end of the line
+- the PDF contains selectable text, not just scanned images
+
+If your bank provides image-only scanned PDFs, this version will usually need a CSV export instead.
+
 ## How to run it
 
 Because the app is fully static, you can open `index.html` directly in a browser.
@@ -49,10 +63,11 @@ Then open `http://localhost:8000`.
 
 - `index.html`: app structure
 - `styles.css`: visual design and responsive layout
-- `app.js`: CSV parsing, transaction cleanup, category inference, and summary calculations
+- `app.js`: CSV parsing, browser-side PDF text extraction, transaction cleanup, category inference, and summary calculations
 
 ## Notes
 
 - Categories are inferred using simple keyword matching, so you can expand the rules in `app.js` as you see real statement data.
 - Savings is currently estimated from transactions that look like transfers to savings accounts.
 - Net cash flow is calculated as `income - spending - savings transfers`.
+- PDF parsing is heuristic-based, so some statement layouts may need follow-up tuning once you test with real files.

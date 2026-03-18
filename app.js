@@ -41,6 +41,9 @@ const els = {
   uploadZone: document.querySelector(".upload-zone")
 };
 
+const PDF_DATE_PATTERN = /\b(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b/;
+const PDF_AMOUNT_PATTERN = /-?\$?\(?\d[\d,]*\.\d{2}\)?/g;
+
 bindEvents();
 
 function bindEvents() {
@@ -79,6 +82,11 @@ function handleFileImport(event) {
 }
 
 function readFile(file) {
+  if (file.name.toLowerCase().endsWith(".pdf") || file.type === "application/pdf") {
+    readPdf(file);
+    return;
+  }
+
   const reader = new FileReader();
   reader.onload = () => {
     els.textInput.value = String(reader.result || "");
@@ -89,6 +97,25 @@ function readFile(file) {
     setStatus("Could not read that file. Try exporting your statement as CSV and upload it again.");
   };
   reader.readAsText(file);
+}
+
+async function readPdf(file) {
+  setStatus(`Reading ${file.name}... extracting transactions from the PDF.`);
+
+  try {
+    const pdfText = await extractPdfText(file);
+    const csvText = pdfTextToCsv(pdfText);
+
+    if (!csvText) {
+      setStatus("I could read the PDF, but I could not confidently find transaction rows. Try a CSV export if your bank offers one.");
+      return;
+    }
+
+    els.textInput.value = csvText;
+    analyzeStatement(csvText);
+  } catch (error) {
+    setStatus(`Could not read that PDF. ${error.message}`);
+  }
 }
 
 function analyzeFromText() {
@@ -157,6 +184,155 @@ function analyzeStatement(csvText) {
   const invalidRows = parsed.length - transactions.length;
   const skippedMessage = invalidRows > 0 ? ` Skipped ${invalidRows} row${invalidRows === 1 ? "" : "s"} that were missing key fields.` : "";
   setStatus(`Analyzed ${transactions.length} transaction${transactions.length === 1 ? "" : "s"}.${skippedMessage}`);
+}
+
+async function extractPdfText(file) {
+  const pdfjsLib = window.pdfjsLib;
+
+  if (!pdfjsLib) {
+    throw new Error("PDF support did not load. Refresh the page and try again.");
+  }
+
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.worker.min.js";
+
+  const buffer = await file.arrayBuffer();
+  const documentTask = pdfjsLib.getDocument({ data: buffer });
+  const pdf = await documentTask.promise;
+  const pages = [];
+
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber);
+    const textContent = await page.getTextContent();
+    const lines = groupPdfItemsIntoLines(textContent.items);
+    pages.push(lines.join("\n"));
+  }
+
+  return pages.join("\n");
+}
+
+function groupPdfItemsIntoLines(items) {
+  const rows = new Map();
+
+  items.forEach((item) => {
+    if (!("str" in item) || !item.str.trim()) {
+      return;
+    }
+
+    const y = Math.round(item.transform[5]);
+    const row = rows.get(y) || [];
+    row.push({
+      x: item.transform[4],
+      text: item.str.trim()
+    });
+    rows.set(y, row);
+  });
+
+  return Array.from(rows.entries())
+    .sort((left, right) => right[0] - left[0])
+    .map(([, lineItems]) => lineItems
+      .sort((left, right) => left.x - right.x)
+      .map((item) => item.text)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim()
+    )
+    .filter(Boolean);
+}
+
+function pdfTextToCsv(pdfText) {
+  const lines = pdfText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const records = [];
+
+  lines.forEach((line) => {
+    const record = parsePdfTransactionLine(line);
+    if (record) {
+      records.push(record);
+    }
+  });
+
+  if (!records.length) {
+    return "";
+  }
+
+  return [
+    "Date,Description,Amount",
+    ...records.map((record) => `${record.date},"${record.description.replace(/"/g, '""')}",${record.amount}`)
+  ].join("\n");
+}
+
+function parsePdfTransactionLine(line) {
+  if (!PDF_DATE_PATTERN.test(line)) {
+    return null;
+  }
+
+  const dateMatch = line.match(PDF_DATE_PATTERN);
+  const amountMatches = [...line.matchAll(PDF_AMOUNT_PATTERN)];
+
+  if (!dateMatch || !amountMatches.length) {
+    return null;
+  }
+
+  const date = normalizePdfDate(dateMatch[1]);
+  const amountToken = amountMatches[amountMatches.length - 1][0];
+  const amount = numericValue(amountToken);
+
+  if (!date || amount === null) {
+    return null;
+  }
+
+  const description = line
+    .replace(dateMatch[0], "")
+    .replace(amountToken, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!description || description.length < 2) {
+    return null;
+  }
+
+  if (looksLikeNonTransaction(description)) {
+    return null;
+  }
+
+  return { date, description, amount };
+}
+
+function normalizePdfDate(dateText) {
+  const parts = dateText.split(/[/-]/).map((part) => part.trim());
+  if (parts.length < 2) {
+    return "";
+  }
+
+  const [month, day, yearPart] = parts;
+  const year = yearPart
+    ? yearPart.length === 2 ? `20${yearPart}` : yearPart
+    : String(new Date().getFullYear());
+
+  const paddedMonth = month.padStart(2, "0");
+  const paddedDay = day.padStart(2, "0");
+  return `${year}-${paddedMonth}-${paddedDay}`;
+}
+
+function looksLikeNonTransaction(text) {
+  const normalized = text.toLowerCase();
+  const blockedTerms = [
+    "beginning balance",
+    "ending balance",
+    "daily balance",
+    "account number",
+    "member fdic",
+    "page ",
+    "statement period",
+    "total deposits",
+    "total withdrawals",
+    "balance summary"
+  ];
+
+  return blockedTerms.some((term) => normalized.includes(term));
 }
 
 function parseCsv(csvText) {

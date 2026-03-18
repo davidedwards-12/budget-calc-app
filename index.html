@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Budget Statement Analyzer</title>
   <link rel="stylesheet" href="styles.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.min.js"></script>
 </head>
 <body>
   <div class="page-shell">
@@ -20,6 +21,7 @@
       <div class="hero-card">
         <p class="card-label">Works best with columns like</p>
         <ul class="format-list">
+          <li><code>PDF</code> bank statements</li>
           <li><code>Date</code></li>
           <li><code>Description</code> or <code>Merchant</code></li>
           <li><code>Amount</code> or separate <code>Debit</code>/<code>Credit</code></li>
@@ -35,8 +37,8 @@
         </div>
 
         <label class="upload-zone" for="statement-file">
-          <input id="statement-file" type="file" accept=".csv,text/csv">
-          <span class="upload-title">Choose a CSV file</span>
+          <input id="statement-file" type="file" accept=".csv,text/csv,.pdf,application/pdf">
+          <span class="upload-title">Choose a CSV or PDF statement</span>
           <span class="upload-subtitle">or drag one here from your bank downloads</span>
         </label>
 
