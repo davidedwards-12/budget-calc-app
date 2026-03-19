@@ -6,6 +6,7 @@ A lightweight browser app for importing bank-statement CSV or PDF files and turn
 
 - Upload or paste a bank statement CSV.
 - Upload a PDF statement and extract likely transaction rows in the browser.
+- Detect multiple account sections inside one PDF and let the user choose which account(s) to include.
 - Detect common columns like `Date`, `Description` or `Merchant`, and `Amount` or `Debit`/`Credit`.
 - Estimate:
   - total income
@@ -46,6 +47,8 @@ It works best when:
 - the PDF contains selectable text, or at least clear, high-contrast scanned text
 
 For scanned PDFs, the app now falls back to OCR automatically. That path is slower than normal text extraction, and some statement layouts may still need bank-specific tuning.
+
+When a PDF appears to contain multiple account sections, the app keeps the full import and lets the user switch between detected accounts without re-uploading or manually cropping the statement.
 
 ## How to run it
 

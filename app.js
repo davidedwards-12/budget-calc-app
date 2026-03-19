@@ -31,6 +31,9 @@ const els = {
   analyzeButton: document.getElementById("analyze-button"),
   clearButton: document.getElementById("clear-button"),
   loadSampleButton: document.getElementById("load-sample"),
+  accountSelection: document.getElementById("account-selection"),
+  accountOptions: document.getElementById("account-options"),
+  applyAccountSelectionButton: document.getElementById("apply-account-selection"),
   statusMessage: document.getElementById("status-message"),
   summaryCards: document.getElementById("summary-cards"),
   summaryRange: document.getElementById("summary-range"),
@@ -60,6 +63,7 @@ function bindEvents() {
   els.analyzeButton.addEventListener("click", analyzeFromText);
   els.clearButton.addEventListener("click", clearAll);
   els.loadSampleButton.addEventListener("click", loadSample);
+  els.applyAccountSelectionButton.addEventListener("click", applyAccountSelection);
 
   ["dragenter", "dragover"].forEach((eventName) => {
     els.uploadZone.addEventListener(eventName, (event) => {
@@ -99,6 +103,8 @@ async function readFile(file) {
   const reader = new FileReader();
   reader.onload = () => {
     els.textInput.value = String(reader.result || "");
+    currentImportMeta = createEmptyImportMeta();
+    renderAccountSelection(currentImportMeta);
     setStatus(`Loaded ${file.name}. Review the CSV if needed, then analyze it.`);
     analyzeStatement(els.textInput.value);
   };
@@ -116,15 +122,13 @@ async function readPdf(file) {
     const pdf = await loadPdfDocument(file);
     const extractedText = await extractPdfTextFromDocument(pdf);
     currentImportMeta = extractStatementMeta(extractedText, file.name);
-    const focusedExtractedText = extractFocusedStatementText(extractedText, currentImportMeta.focusAccount);
-    let csvText = pdfTextToCsv(focusedExtractedText || extractedText);
+    let csvText = pdfTextToCsv(extractedText);
 
     if (!csvText) {
       setStatus(`Reading ${file.name}... no usable embedded text found, switching to OCR.`);
       const ocrText = await extractPdfTextWithOcr(pdf);
       currentImportMeta = extractStatementMeta(ocrText, file.name);
-      const focusedOcrText = extractFocusedStatementText(ocrText, currentImportMeta.focusAccount);
-      csvText = pdfTextToCsv(focusedOcrText || ocrText);
+      csvText = pdfTextToCsv(ocrText);
 
       if (!csvText) {
         const extractionIssue = detectPdfExtractionIssue(ocrText, true);
@@ -134,10 +138,12 @@ async function readPdf(file) {
     }
 
     els.textInput.value = csvText;
+    renderAccountSelection(currentImportMeta);
     analyzeStatement(csvText, currentImportMeta);
   } catch (error) {
     els.textInput.value = "";
     currentImportMeta = createEmptyImportMeta();
+    renderAccountSelection(currentImportMeta);
     setStatus(`Could not read that PDF. ${error.message}`);
   }
 }
@@ -162,12 +168,14 @@ async function isPdfFile(file) {
 
 function analyzeFromText() {
   currentImportMeta = createEmptyImportMeta();
+  renderAccountSelection(currentImportMeta);
   analyzeStatement(els.textInput.value);
 }
 
 function loadSample() {
   els.textInput.value = SAMPLE_CSV;
   currentImportMeta = createEmptyImportMeta();
+  renderAccountSelection(currentImportMeta);
   analyzeStatement(SAMPLE_CSV, currentImportMeta);
 }
 
@@ -175,6 +183,7 @@ function clearAll() {
   els.fileInput.value = "";
   els.textInput.value = "";
   currentImportMeta = createEmptyImportMeta();
+  renderAccountSelection(currentImportMeta);
   setStatus("Upload or paste a statement to begin.");
   els.summaryRange.textContent = "No statement loaded yet";
   els.transactionCount.textContent = "0 transactions";
@@ -190,6 +199,20 @@ function clearAll() {
       <td colspan="7" class="table-empty">No statement imported yet.</td>
     </tr>
   `;
+}
+
+function applyAccountSelection() {
+  const selectedAccounts = Array.from(els.accountOptions.querySelectorAll('input[name="account-selection"]:checked'))
+    .map((input) => input.value);
+
+  if (!selectedAccounts.length) {
+    setStatus("Choose at least one detected account section before applying the selection.");
+    return;
+  }
+
+  currentImportMeta = applySelectedAccountsToImportMeta(currentImportMeta, selectedAccounts);
+  renderAccountSelection(currentImportMeta);
+  analyzeStatement(els.textInput.value, currentImportMeta);
 }
 
 function analyzeStatement(csvText, importMeta = currentImportMeta) {
@@ -566,9 +589,11 @@ function normalizePotentialTransactionLine(line) {
 function createEmptyImportMeta() {
   return {
     openingBalance: null,
+    openingBalances: {},
     accountTypes: [],
     statementYear: null,
-    focusAccount: null
+    focusAccount: null,
+    selectedAccounts: []
   };
 }
 
@@ -576,7 +601,6 @@ function extractStatementMeta(statementText, fileName = "") {
   const text = String(statementText || "");
   const normalized = text.toLowerCase();
   const accountTypes = new Set();
-  const focusAccount = "Checking";
 
   if (normalized.includes("checking statement")) {
     accountTypes.add("Checking");
@@ -598,17 +622,64 @@ function extractStatementMeta(statementText, fileName = "") {
     accountTypes.add("Savings");
   }
 
-  const focusedText = extractFocusedStatementText(text, focusAccount);
-  const openingBalance = focusedText
-    ? extractOpeningBalance(focusedText)
-    : extractOpeningBalanceByAccountContext(text, focusAccount);
+  if (!accountTypes.size) {
+    accountTypes.add("Checking");
+  }
+
+  const accountList = Array.from(accountTypes);
+  const openingBalances = {};
+
+  accountList.forEach((account) => {
+    const focusedText = extractFocusedStatementText(text, account);
+    const openingBalance = focusedText
+      ? extractOpeningBalance(focusedText)
+      : extractOpeningBalanceByAccountContext(text, account);
+    openingBalances[account] = openingBalance;
+  });
+
+  const selectedAccounts = accountList.slice();
+
+  return applySelectedAccountsToImportMeta({
+    openingBalance: null,
+    openingBalances,
+    accountTypes: accountList,
+    statementYear: extractStatementYear(text, fileName),
+    focusAccount: selectedAccounts.length === 1 ? selectedAccounts[0] : null,
+    selectedAccounts
+  }, selectedAccounts);
+}
+
+function applySelectedAccountsToImportMeta(importMeta, selectedAccounts) {
+  const normalizedSelectedAccounts = Array.from(new Set((selectedAccounts || []).filter(Boolean)));
+  const selectedOpeningBalance = normalizedSelectedAccounts.length === 1
+    ? importMeta?.openingBalances?.[normalizedSelectedAccounts[0]] ?? null
+    : null;
 
   return {
-    openingBalance,
-    accountTypes: Array.from(accountTypes),
-    statementYear: extractStatementYear(text, fileName),
-    focusAccount
+    ...importMeta,
+    selectedAccounts: normalizedSelectedAccounts,
+    focusAccount: normalizedSelectedAccounts.length === 1 ? normalizedSelectedAccounts[0] : null,
+    openingBalance: selectedOpeningBalance
   };
+}
+
+function renderAccountSelection(importMeta = currentImportMeta) {
+  const availableAccounts = Array.isArray(importMeta?.accountTypes) ? importMeta.accountTypes.filter(Boolean) : [];
+
+  if (availableAccounts.length <= 1) {
+    els.accountSelection.classList.add("hidden");
+    els.accountOptions.innerHTML = "";
+    return;
+  }
+
+  const selectedAccounts = new Set(importMeta?.selectedAccounts?.length ? importMeta.selectedAccounts : availableAccounts);
+  els.accountSelection.classList.remove("hidden");
+  els.accountOptions.innerHTML = availableAccounts.map((account) => `
+    <label class="account-option">
+      <input type="checkbox" name="account-selection" value="${escapeHtml(account)}" ${selectedAccounts.has(account) ? "checked" : ""}>
+      <span>${escapeHtml(account)}</span>
+    </label>
+  `).join("");
 }
 
 function extractFocusedStatementText(statementText, focusAccount) {
@@ -790,12 +861,13 @@ function extractOpeningBalanceByAccountContext(statementText, focusAccount) {
 }
 
 function inferOpeningBalanceFromFirstTransaction(transactions, importMeta) {
-  if (!Array.isArray(transactions) || !transactions.length || importMeta?.focusAccount !== "Checking") {
+  if (!Array.isArray(transactions) || !transactions.length || importMeta?.selectedAccounts?.length !== 1) {
     return null;
   }
 
+  const selectedAccount = importMeta.selectedAccounts[0];
   const firstCheckingTransaction = transactions.find((transaction) =>
-    transaction.account === "Checking" && transaction.balanceHint !== null
+    (transaction.account === selectedAccount || transaction.account === "Unknown") && transaction.balanceHint !== null
   );
 
   if (!firstCheckingTransaction) {
@@ -818,36 +890,45 @@ function hasMultipleAccountTypes(importMeta) {
   return Array.isArray(importMeta?.accountTypes) && importMeta.accountTypes.length > 1;
 }
 
-function canShowRunningBalance(importMeta) {
-  if (importMeta?.focusAccount === "Checking") {
-    return importMeta?.openingBalance !== null;
-  }
+function hasMultipleSelectedAccounts(importMeta) {
+  return Array.isArray(importMeta?.selectedAccounts) && importMeta.selectedAccounts.length > 1;
+}
 
-  return importMeta?.openingBalance !== null && !hasMultipleAccountTypes(importMeta);
+function canShowRunningBalance(importMeta) {
+  return importMeta?.openingBalance !== null && !hasMultipleSelectedAccounts(importMeta);
 }
 
 function buildBalanceStatusMessage(importMeta) {
-  if (importMeta?.focusAccount === "Checking") {
-    return " Showing checking-account transactions only.";
+  if (hasMultipleSelectedAccounts(importMeta)) {
+    const label = importMeta.selectedAccounts.join(" + ");
+    return ` Showing ${label} transactions together, so the last column is net movement instead of a true account balance.`;
   }
 
-  if (hasMultipleAccountTypes(importMeta)) {
-    return " This PDF appears to include both checking and savings sections, so the last column is shown as net movement instead of a true account balance.";
-  }
+  if (importMeta?.selectedAccounts?.length === 1) {
+    const selectedAccount = importMeta.selectedAccounts[0];
 
-  if (importMeta?.openingBalance !== null) {
-    return ` Using starting balance ${money(importMeta.openingBalance)} for the running balance column.`;
+    if (importMeta?.openingBalance !== null) {
+      return ` Showing ${selectedAccount} transactions only. Using starting balance ${money(importMeta.openingBalance)} for the running balance column.`;
+    }
+
+    return ` Showing ${selectedAccount} transactions only.`;
   }
 
   return "";
 }
 
 function shouldIncludeTransaction(transaction, importMeta) {
-  if (importMeta?.focusAccount !== "Checking") {
+  const selectedAccounts = Array.isArray(importMeta?.selectedAccounts) ? importMeta.selectedAccounts.filter(Boolean) : [];
+
+  if (!selectedAccounts.length) {
     return true;
   }
 
-  return transaction.account === "Checking" || transaction.account === "Unknown";
+  if (selectedAccounts.length === 1) {
+    return transaction.account === selectedAccounts[0] || transaction.account === "Unknown";
+  }
+
+  return selectedAccounts.includes(transaction.account) || transaction.account === "Unknown";
 }
 
 function looksLikeSummaryGridLine(line, dateMatches, amountMatches) {
@@ -1296,12 +1377,12 @@ function renderBreakdown(container, items, scaleTotal) {
 
 function renderTransactions(transactions, importMeta = currentImportMeta) {
   let runningValue = importMeta.openingBalance ?? 0;
-  const showRunningBalance = importMeta?.openingBalance !== null;
+  const showRunningBalance = canShowRunningBalance(importMeta);
   const rows = [];
 
   els.runningTotalHeader.textContent = showRunningBalance ? "Running Balance" : "Running Net";
 
-  if (importMeta?.openingBalance !== null) {
+  if (showRunningBalance) {
     rows.push(`
       <tr>
         <td></td>
