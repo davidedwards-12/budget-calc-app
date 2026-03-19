@@ -302,6 +302,7 @@ button:hover {
 }
 
 .summary-card {
+  min-width: 0;
   padding: 18px;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.72);
@@ -319,8 +320,11 @@ button:hover {
 
 .summary-card strong {
   display: block;
-  font-size: clamp(1.4rem, 2vw, 2rem);
+  max-width: 100%;
+  font-size: clamp(1.15rem, 1.7vw, 1.9rem);
   line-height: 1.05;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .summary-card p {

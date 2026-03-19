@@ -21,7 +21,7 @@ const CATEGORY_RULES = [
   { category: "Entertainment", keywords: ["netflix", "spotify", "hulu", "cinema", "movie", "steam"] },
   { category: "Shopping", keywords: ["amazon", "marketplace", "etsy", "best buy", "apple", "store"] },
   { category: "Health", keywords: ["pharmacy", "walgreens", "cvs", "hospital", "dental", "medical"] },
-  { category: "Savings Transfer", keywords: ["transfer to savings", "savings transfer", "ally savings", "capital one savings"] },
+  { category: "Savings Transfer", keywords: ["transfer", "xfer", "transfer to savings", "savings transfer", "transfer from", "transfer to", "ally savings", "capital one savings"] },
   { category: "Income", keywords: ["payroll", "salary", "deposit", "cashout", "refund", "reimbursement", "interest"] }
 ];
 
@@ -38,16 +38,20 @@ const els = {
   merchantBreakdown: document.getElementById("merchant-breakdown"),
   transactionsBody: document.getElementById("transactions-body"),
   transactionCount: document.getElementById("transaction-count"),
+  runningTotalHeader: document.getElementById("running-total-header"),
   uploadZone: document.querySelector(".upload-zone")
 };
 
 const PDF_DATE_PATTERN = /\b(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b/;
 const PDF_AMOUNT_PATTERN = /-?\$?\(?\d[\d,\s]*\.\d{2}\)?/g;
+const OPENING_BALANCE_LABEL_PATTERN = /(?:start(?:ing)?|begin(?:ning)?|open(?:ing)?|previous)\s+bal(?:a|e)\s*nce|balance\s+forward/i;
 const OCR_CONFIG = {
   workerPath: "vendor/tesseract.worker.min.js",
   corePath: "https://unpkg.com/tesseract.js-core@5/tesseract-core.wasm.js",
   langPath: "https://tessdata.projectnaptha.com/4.0.0_best"
 };
+
+let currentImportMeta = createEmptyImportMeta();
 
 bindEvents();
 
@@ -111,12 +115,16 @@ async function readPdf(file) {
   try {
     const pdf = await loadPdfDocument(file);
     const extractedText = await extractPdfTextFromDocument(pdf);
-    let csvText = pdfTextToCsv(extractedText);
+    currentImportMeta = extractStatementMeta(extractedText, file.name);
+    const focusedExtractedText = extractFocusedStatementText(extractedText, currentImportMeta.focusAccount);
+    let csvText = pdfTextToCsv(focusedExtractedText || extractedText);
 
     if (!csvText) {
       setStatus(`Reading ${file.name}... no usable embedded text found, switching to OCR.`);
       const ocrText = await extractPdfTextWithOcr(pdf);
-      csvText = pdfTextToCsv(ocrText);
+      currentImportMeta = extractStatementMeta(ocrText, file.name);
+      const focusedOcrText = extractFocusedStatementText(ocrText, currentImportMeta.focusAccount);
+      csvText = pdfTextToCsv(focusedOcrText || ocrText);
 
       if (!csvText) {
         const extractionIssue = detectPdfExtractionIssue(ocrText, true);
@@ -126,9 +134,10 @@ async function readPdf(file) {
     }
 
     els.textInput.value = csvText;
-    analyzeStatement(csvText);
+    analyzeStatement(csvText, currentImportMeta);
   } catch (error) {
     els.textInput.value = "";
+    currentImportMeta = createEmptyImportMeta();
     setStatus(`Could not read that PDF. ${error.message}`);
   }
 }
@@ -152,20 +161,24 @@ async function isPdfFile(file) {
 }
 
 function analyzeFromText() {
+  currentImportMeta = createEmptyImportMeta();
   analyzeStatement(els.textInput.value);
 }
 
 function loadSample() {
   els.textInput.value = SAMPLE_CSV;
-  analyzeStatement(SAMPLE_CSV);
+  currentImportMeta = createEmptyImportMeta();
+  analyzeStatement(SAMPLE_CSV, currentImportMeta);
 }
 
 function clearAll() {
   els.fileInput.value = "";
   els.textInput.value = "";
+  currentImportMeta = createEmptyImportMeta();
   setStatus("Upload or paste a statement to begin.");
   els.summaryRange.textContent = "No statement loaded yet";
   els.transactionCount.textContent = "0 transactions";
+  els.runningTotalHeader.textContent = "Running Net";
   els.summaryCards.innerHTML = "<p>Your totals will appear here after import.</p>";
   els.summaryCards.classList.add("empty-state");
   els.categoryBreakdown.innerHTML = "<p>No spending categories yet.</p>";
@@ -174,12 +187,12 @@ function clearAll() {
   els.merchantBreakdown.classList.add("empty-state");
   els.transactionsBody.innerHTML = `
     <tr>
-      <td colspan="5" class="table-empty">No statement imported yet.</td>
+      <td colspan="7" class="table-empty">No statement imported yet.</td>
     </tr>
   `;
 }
 
-function analyzeStatement(csvText) {
+function analyzeStatement(csvText, importMeta = currentImportMeta) {
   if (!csvText.trim()) {
     setStatus("Paste statement rows or upload a CSV file first.");
     return;
@@ -201,6 +214,7 @@ function analyzeStatement(csvText) {
   const transactions = parsed
     .map(normalizeTransaction)
     .filter(Boolean)
+    .filter((transaction) => shouldIncludeTransaction(transaction, importMeta))
     .sort((left, right) => left.dateValue - right.dateValue);
 
   if (!transactions.length) {
@@ -208,15 +222,23 @@ function analyzeStatement(csvText) {
     return;
   }
 
+  if (importMeta?.openingBalance === null) {
+    const inferredOpeningBalance = inferOpeningBalanceFromFirstTransaction(transactions, importMeta);
+    if (inferredOpeningBalance !== null) {
+      importMeta.openingBalance = inferredOpeningBalance;
+    }
+  }
+
   const summary = buildSummary(transactions);
   renderSummary(summary);
   renderBreakdown(els.categoryBreakdown, summary.categorySpend, summary.totalSpent);
   renderBreakdown(els.merchantBreakdown, summary.topMerchants, summary.topMerchants[0]?.amount || 0);
-  renderTransactions(transactions);
+  renderTransactions(transactions, importMeta);
 
   const invalidRows = parsed.length - transactions.length;
   const skippedMessage = invalidRows > 0 ? ` Skipped ${invalidRows} row${invalidRows === 1 ? "" : "s"} that were missing key fields.` : "";
-  setStatus(`Analyzed ${transactions.length} transaction${transactions.length === 1 ? "" : "s"}.${skippedMessage}`);
+  const balanceMessage = buildBalanceStatusMessage(importMeta);
+  setStatus(`Analyzed ${transactions.length} transaction${transactions.length === 1 ? "" : "s"}.${skippedMessage}${balanceMessage}`);
 }
 
 async function loadPdfDocument(file) {
@@ -378,9 +400,11 @@ function pdfTextToCsv(pdfText) {
     .filter(Boolean);
 
   const records = [];
+  let currentAccount = "";
 
   lines.forEach((line) => {
-    const record = parsePdfTransactionLine(line);
+    currentAccount = detectAccountFromLine(line) || currentAccount;
+    const record = parsePdfTransactionLine(line, currentAccount);
     if (record) {
       records.push(record);
     }
@@ -391,28 +415,33 @@ function pdfTextToCsv(pdfText) {
   }
 
   return [
-    "Date,Description,Amount",
-    ...records.map((record) => `${record.date},"${record.description.replace(/"/g, '""')}",${record.amount}`)
+    "Date,Account,Description,Amount,BalanceHint",
+    ...records.map((record) => `${record.date},"${record.account.replace(/"/g, '""')}","${record.description.replace(/"/g, '""')}",${record.amount},${record.balanceHint ?? ""}`)
   ].join("\n");
 }
 
-function parsePdfTransactionLine(line) {
+function parsePdfTransactionLine(line, account = "") {
   const normalizedLine = normalizePotentialTransactionLine(line);
+  const dateMatches = [...normalizedLine.matchAll(new RegExp(PDF_DATE_PATTERN, "g"))];
+  const amountMatches = [...normalizedLine.matchAll(PDF_AMOUNT_PATTERN)];
+
+  if (looksLikeSummaryGridLine(normalizedLine, dateMatches, amountMatches)) {
+    return null;
+  }
 
   if (!PDF_DATE_PATTERN.test(normalizedLine)) {
     return null;
   }
 
   const dateMatch = normalizedLine.match(PDF_DATE_PATTERN);
-  const amountMatches = [...normalizedLine.matchAll(PDF_AMOUNT_PATTERN)];
 
   if (!dateMatch || !amountMatches.length) {
     return null;
   }
 
   const date = normalizePdfDate(dateMatch[1]);
-  const amountToken = amountMatches[amountMatches.length - 1][0];
-  const amount = numericValue(amountToken);
+  const selectedAmount = selectTransactionAmount(normalizedLine, amountMatches);
+  const amount = selectedAmount?.value ?? null;
 
   if (!date || amount === null) {
     return null;
@@ -420,7 +449,7 @@ function parsePdfTransactionLine(line) {
 
   const cleanedDescription = normalizedLine
     .replace(dateMatch[0], "")
-    .replace(amountToken, "")
+    .replace(PDF_AMOUNT_PATTERN, " ")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -428,11 +457,99 @@ function parsePdfTransactionLine(line) {
     return null;
   }
 
+  if (!/[a-z]/i.test(cleanedDescription)) {
+    return null;
+  }
+
   if (looksLikeNonTransaction(cleanedDescription)) {
     return null;
   }
 
-  return { date, description: cleanedDescription, amount };
+  return {
+    date,
+    account: account || "Unknown",
+    description: cleanedDescription,
+    amount,
+    balanceHint: extractBalanceHint(amountMatches, selectedAmount)
+  };
+}
+
+function selectTransactionAmount(line, amountMatches) {
+  const candidates = amountMatches
+    .map((match) => {
+      const token = match[0];
+      const value = numericValue(token);
+
+      if (value === null) {
+        return null;
+      }
+
+      return {
+        token,
+        value,
+        index: match.index ?? 0,
+        explicitNegative: /^-\$?\(?/.test(token.trim()) || /^\(\$?/.test(token.trim()),
+        absoluteValue: Math.abs(value)
+      };
+    })
+    .filter(Boolean);
+
+  if (!candidates.length) {
+    return null;
+  }
+
+  if (candidates.length === 1) {
+    return candidates[0];
+  }
+
+  const normalizedLine = line.toLowerCase();
+  const debitLikeLine = looksLikeExpenseDescription(normalizedLine);
+  const creditLikeLine = looksLikeIncomeDescription(normalizedLine);
+
+  if (debitLikeLine) {
+    const explicitNegativeCandidates = candidates.filter((candidate) => candidate.explicitNegative);
+    if (explicitNegativeCandidates.length) {
+      return explicitNegativeCandidates.sort(compareAmountCandidates)[0];
+    }
+  }
+
+  if (creditLikeLine) {
+    const nonNegativeCandidates = candidates.filter((candidate) => !candidate.explicitNegative);
+    if (nonNegativeCandidates.length) {
+      return nonNegativeCandidates.sort(compareAmountCandidates)[0];
+    }
+  }
+
+  return candidates.sort(compareAmountCandidates)[0];
+}
+
+function compareAmountCandidates(left, right) {
+  if (left.absoluteValue !== right.absoluteValue) {
+    return left.absoluteValue - right.absoluteValue;
+  }
+
+  return left.index - right.index;
+}
+
+function extractBalanceHint(amountMatches, selectedAmount) {
+  if (!selectedAmount || amountMatches.length < 2) {
+    return null;
+  }
+
+  const remainingCandidates = amountMatches
+    .map((match) => ({
+      index: match.index ?? 0,
+      value: numericValue(match[0])
+    }))
+    .filter((candidate) => candidate.value !== null)
+    .filter((candidate) => !(candidate.index === selectedAmount.index && candidate.value === selectedAmount.value))
+    .filter((candidate) => candidate.value >= 0);
+
+  if (!remainingCandidates.length) {
+    return null;
+  }
+
+  return remainingCandidates.sort((left, right) => right.index - left.index)[0].value;
 }
 
 function normalizePotentialTransactionLine(line) {
@@ -446,6 +563,319 @@ function normalizePotentialTransactionLine(line) {
     .trim();
 }
 
+function createEmptyImportMeta() {
+  return {
+    openingBalance: null,
+    accountTypes: [],
+    statementYear: null,
+    focusAccount: null
+  };
+}
+
+function extractStatementMeta(statementText, fileName = "") {
+  const text = String(statementText || "");
+  const normalized = text.toLowerCase();
+  const accountTypes = new Set();
+  const focusAccount = "Checking";
+
+  if (normalized.includes("checking statement")) {
+    accountTypes.add("Checking");
+  }
+
+  if (normalized.includes("savings statement")) {
+    accountTypes.add("Savings");
+  }
+
+  if (normalized.includes("withdrawals, fees and other debits")) {
+    accountTypes.add("Checking");
+  }
+
+  if (
+    normalized.includes("deposits, dividends and other credits") ||
+    normalized.includes("dividend rate summary") ||
+    normalized.includes("total dividends")
+  ) {
+    accountTypes.add("Savings");
+  }
+
+  const focusedText = extractFocusedStatementText(text, focusAccount);
+  const openingBalance = focusedText
+    ? extractOpeningBalance(focusedText)
+    : extractOpeningBalanceByAccountContext(text, focusAccount);
+
+  return {
+    openingBalance,
+    accountTypes: Array.from(accountTypes),
+    statementYear: extractStatementYear(text, fileName),
+    focusAccount
+  };
+}
+
+function extractFocusedStatementText(statementText, focusAccount) {
+  const text = String(statementText || "");
+  if (!text.trim() || !focusAccount) {
+    return "";
+  }
+
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const focusHeader = focusAccount.toLowerCase() === "checking" ? "checking statement" : "savings statement";
+  const otherHeader = focusAccount.toLowerCase() === "checking" ? "savings statement" : "checking statement";
+  const focusStartIndex = lines.findIndex((line) => line.toLowerCase().includes(focusHeader));
+
+  if (focusStartIndex === -1) {
+    return "";
+  }
+
+  const focusLines = [];
+
+  for (let index = focusStartIndex; index < lines.length; index += 1) {
+    const normalizedLine = lines[index].toLowerCase();
+
+    if (index > focusStartIndex && normalizedLine.includes(otherHeader)) {
+      break;
+    }
+
+    focusLines.push(lines[index]);
+  }
+
+  return focusLines.join("\n");
+}
+
+function extractStatementYear(statementText, fileName = "") {
+  const sources = [String(statementText || ""), String(fileName || "")];
+
+  for (const source of sources) {
+    const fullDateMatch = source.match(/\b(?:\d{1,2}[/-]\d{1,2}[/-](20\d{2})|(20\d{2})[-/]\d{1,2}[-/]\d{1,2})\b/);
+    if (fullDateMatch) {
+      return Number(fullDateMatch[1] || fullDateMatch[2]);
+    }
+
+    const monthYearMatch = source.match(/\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s_-]*(20\d{2})\b/i);
+    if (monthYearMatch) {
+      return Number(monthYearMatch[1]);
+    }
+
+    const yearOnlyMatch = source.match(/\b(20\d{2})\b/);
+    if (yearOnlyMatch) {
+      return Number(yearOnlyMatch[1]);
+    }
+  }
+
+  return new Date().getFullYear();
+}
+
+function detectAccountFromLine(line) {
+  const normalized = String(line || "").toLowerCase();
+
+  if (normalized.includes("checking statement")) {
+    return "Checking";
+  }
+
+  if (normalized.includes("savings statement")) {
+    return "Savings";
+  }
+
+  return "";
+}
+
+function extractOpeningBalance(statementText) {
+  const fullText = String(statementText || "");
+  const normalizedText = normalizeBalanceLabelText(fullText);
+  const openingBalancePattern = /(?:start(?:ing)?|begin(?:ning)?|open(?:ing)?|previous)\s+bal(?:a|e)nce[\s:$-]*(-?\$?\(?\d[\d,\s]*\.\d{2}\)?)/i;
+  const inlineMatch = normalizedText.match(openingBalancePattern);
+
+  if (inlineMatch) {
+    const inlineOpeningBalance = numericValue(inlineMatch[1]);
+    if (inlineOpeningBalance !== null) {
+      return inlineOpeningBalance;
+    }
+  }
+
+  const lines = fullText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const normalizedLine = normalizeBalanceLabelText(line);
+
+    if (!OPENING_BALANCE_LABEL_PATTERN.test(normalizedLine)) {
+      continue;
+    }
+
+    const amountMatches = [...line.matchAll(PDF_AMOUNT_PATTERN)];
+    if (!amountMatches.length) {
+      continue;
+    }
+
+    const openingBalance = numericValue(amountMatches[amountMatches.length - 1][0]);
+    if (openingBalance !== null) {
+      return openingBalance;
+    }
+  }
+
+  return null;
+}
+
+function extractOpeningBalanceByAccountContext(statementText, focusAccount) {
+  const lines = String(statementText || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (!lines.length || !focusAccount) {
+    return null;
+  }
+
+  const preferredMarkers = focusAccount === "Checking"
+    ? [
+      "checking statement",
+      "withdrawals, fees and other debits",
+      "checks cleared",
+      "w/d ",
+      "ext w/d",
+      "billpay",
+      "ach debit",
+      "debit card"
+    ]
+    : ["savings statement", "dividend rate summary", "total dividends", "deposits, dividends and other credits"];
+  const opposingMarkers = focusAccount === "Checking"
+    ? ["savings statement", "dividend rate summary", "total dividends", "deposits, dividends and other credits"]
+    : ["checking statement", "withdrawals, fees and other debits", "checks cleared"];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const normalizedLine = normalizeBalanceLabelText(line);
+
+    if (!OPENING_BALANCE_LABEL_PATTERN.test(normalizedLine)) {
+      continue;
+    }
+
+    const candidateLines = [
+      line,
+      `${line} ${lines[index + 1] || ""}`.trim(),
+      `${line} ${lines[index + 1] || ""} ${lines[index + 2] || ""}`.trim()
+    ];
+
+    const amountMatches = candidateLines
+      .map((candidateLine) => [...candidateLine.matchAll(PDF_AMOUNT_PATTERN)])
+      .find((matches) => matches.length) || [];
+
+    if (!amountMatches.length) {
+      continue;
+    }
+
+    const contextWindow = lines
+      .slice(Math.max(0, index - 20), Math.min(lines.length, index + 21))
+      .join(" ")
+      .toLowerCase();
+    const matchesPreferredContext = preferredMarkers.some((marker) => contextWindow.includes(marker));
+    const matchesOpposingContext = opposingMarkers.some((marker) => contextWindow.includes(marker));
+
+    if (!matchesPreferredContext || matchesOpposingContext) {
+      continue;
+    }
+
+    const openingBalance = numericValue(amountMatches[amountMatches.length - 1][0]);
+    if (openingBalance !== null) {
+      return openingBalance;
+    }
+  }
+
+  return null;
+}
+
+function inferOpeningBalanceFromFirstTransaction(transactions, importMeta) {
+  if (!Array.isArray(transactions) || !transactions.length || importMeta?.focusAccount !== "Checking") {
+    return null;
+  }
+
+  const firstCheckingTransaction = transactions.find((transaction) =>
+    transaction.account === "Checking" && transaction.balanceHint !== null
+  );
+
+  if (!firstCheckingTransaction) {
+    return null;
+  }
+
+  return firstCheckingTransaction.balanceHint - firstCheckingTransaction.amount;
+}
+
+function normalizeBalanceLabelText(text) {
+  return String(text || "")
+    .replace(/\bbal\s+ance\b/gi, "balance")
+    .replace(/\bbalence\b/gi, "balance")
+    .replace(/\bbegining\b/gi, "beginning")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hasMultipleAccountTypes(importMeta) {
+  return Array.isArray(importMeta?.accountTypes) && importMeta.accountTypes.length > 1;
+}
+
+function canShowRunningBalance(importMeta) {
+  if (importMeta?.focusAccount === "Checking") {
+    return importMeta?.openingBalance !== null;
+  }
+
+  return importMeta?.openingBalance !== null && !hasMultipleAccountTypes(importMeta);
+}
+
+function buildBalanceStatusMessage(importMeta) {
+  if (importMeta?.focusAccount === "Checking") {
+    return " Showing checking-account transactions only.";
+  }
+
+  if (hasMultipleAccountTypes(importMeta)) {
+    return " This PDF appears to include both checking and savings sections, so the last column is shown as net movement instead of a true account balance.";
+  }
+
+  if (importMeta?.openingBalance !== null) {
+    return ` Using starting balance ${money(importMeta.openingBalance)} for the running balance column.`;
+  }
+
+  return "";
+}
+
+function shouldIncludeTransaction(transaction, importMeta) {
+  if (importMeta?.focusAccount !== "Checking") {
+    return true;
+  }
+
+  return transaction.account === "Checking" || transaction.account === "Unknown";
+}
+
+function looksLikeSummaryGridLine(line, dateMatches, amountMatches) {
+  const alphaCharacterCount = (line.match(/[a-z]/gi) || []).length;
+
+  if (dateMatches.length >= 2 && amountMatches.length >= 2) {
+    return true;
+  }
+
+  if (dateMatches.length >= 1 && amountMatches.length >= 3) {
+    return true;
+  }
+
+  if (/date\s+amount/i.test(line)) {
+    return true;
+  }
+
+  if (alphaCharacterCount === 0 && dateMatches.length >= 1 && amountMatches.length >= 2) {
+    return true;
+  }
+
+  if (alphaCharacterCount <= 4 && dateMatches.length >= 1 && amountMatches.length >= 2) {
+    return true;
+  }
+
+  return false;
+}
+
 function normalizePdfDate(dateText) {
   const parts = dateText.split(/[/-]/).map((part) => part.trim());
   if (parts.length < 2) {
@@ -455,7 +885,7 @@ function normalizePdfDate(dateText) {
   const [month, day, yearPart] = parts;
   const year = yearPart
     ? yearPart.length === 2 ? `20${yearPart}` : yearPart
-    : String(new Date().getFullYear());
+    : String(currentImportMeta.statementYear || new Date().getFullYear());
 
   const paddedMonth = month.padStart(2, "0");
   const paddedDay = day.padStart(2, "0");
@@ -466,14 +896,23 @@ function looksLikeNonTransaction(text) {
   const normalized = text.toLowerCase();
   const blockedTerms = [
     "beginning balance",
+    "starting balance",
     "ending balance",
     "daily balance",
     "account number",
     "member fdic",
     "page ",
     "statement period",
+    "checking statement",
+    "savings statement",
+    "deposits, dividends and other credits",
+    "withdrawals, fees and other debits",
+    "total dividends",
     "total deposits",
     "total withdrawals",
+    "total fees",
+    "total number of checks cleared",
+    "dividend rate summary",
     "balance summary"
   ];
 
@@ -545,8 +984,10 @@ function parseCsv(csvText) {
 
 function normalizeTransaction(record) {
   const dateText = firstValue(record, ["date", "posteddate", "transactiondate"]);
+  const rawAccount = firstValue(record, ["account"]);
   const description = firstValue(record, ["description", "merchant", "details", "memo", "name"]);
   const amountText = firstValue(record, ["amount", "transactionamount"]);
+  const balanceHintText = firstValue(record, ["balancehint", "runningbalance", "balance"]);
   const debitText = firstValue(record, ["debit", "withdrawal", "outflow"]);
   const creditText = firstValue(record, ["credit", "deposit", "inflow"]);
 
@@ -559,12 +1000,18 @@ function normalizeTransaction(record) {
     return null;
   }
 
-  const amount = parseAmount(amountText, debitText, creditText);
+  const cleanedDescription = cleanDescription(description);
+  const account = inferAccount(rawAccount, cleanedDescription);
+  const amount = normalizeSignedAmount(
+    parseAmount(amountText, debitText, creditText),
+    cleanedDescription
+  );
+  const balanceHint = numericValue(balanceHintText);
+
   if (amount === null) {
     return null;
   }
 
-  const cleanedDescription = cleanDescription(description);
   const category = inferCategory(cleanedDescription, amount);
   const type = inferType(category, amount);
 
@@ -572,8 +1019,10 @@ function normalizeTransaction(record) {
     date,
     dateValue: date.valueOf(),
     dateLabel: date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }),
+    account,
     description: cleanedDescription,
     amount,
+    balanceHint,
     category,
     type
   };
@@ -626,8 +1075,123 @@ function numericValue(text) {
   return Number.isFinite(amount) ? amount : null;
 }
 
+function normalizeSignedAmount(amount, description) {
+  if (amount === null) {
+    return null;
+  }
+
+  const normalized = description.toLowerCase();
+
+  if (amount > 0 && looksLikeExpenseDescription(normalized) && !looksLikeIncomeDescription(normalized)) {
+    return -amount;
+  }
+
+  if (amount < 0 && looksLikeIncomeDescription(normalized) && !looksLikeExpenseDescription(normalized)) {
+    return Math.abs(amount);
+  }
+
+  return amount;
+}
+
+function looksLikeExpenseDescription(normalizedDescription) {
+  const expenseIndicators = [
+    "w/d",
+    "withdrawal",
+    "purchase",
+    "card purchase",
+    "visa purchase",
+    "dbt purchase",
+    "debit card",
+    "debit purchase",
+    "pos ",
+    "ach debit",
+    "payment",
+    "cafe",
+    "restaurant",
+    "market",
+    "fuel",
+    "gas",
+    "coffee",
+    "transfer to"
+  ];
+
+  return expenseIndicators.some((indicator) => normalizedDescription.includes(indicator));
+}
+
+function looksLikeIncomeDescription(normalizedDescription) {
+  const incomeIndicators = [
+    "deposit",
+    "payroll",
+    "salary",
+    "refund",
+    "reimbursement",
+    "interest",
+    "credit",
+    "cashout",
+    "direct dep"
+  ];
+
+  return incomeIndicators.some((indicator) => normalizedDescription.includes(indicator))
+    && !normalizedDescription.includes("transfer from")
+    && !normalizedDescription.includes("internet transfer");
+}
+
+function looksLikeTransferDescription(normalizedDescription) {
+  return normalizedDescription.includes("transfer")
+    || normalizedDescription.includes("xfer")
+    || /(?:\bfrom\b|\bto\b).*(?:\bck\b|\bsav\b)/i.test(normalizedDescription);
+}
+
+function inferAccount(rawAccount, description) {
+  const normalizedAccount = String(rawAccount || "").trim();
+  if (normalizedAccount && normalizedAccount !== "Unknown") {
+    return normalizedAccount;
+  }
+
+  const normalizedDescription = description.toLowerCase();
+
+  if (/deposit .* from .* ck|internet transfer from .* ck/.test(normalizedDescription)) {
+    return "Savings";
+  }
+
+  if (/deposit .* from .* sav|internet transfer from .* sav/.test(normalizedDescription)) {
+    return "Checking";
+  }
+
+  if (/w\/d .* to .* sav|internet transfer to .* sav/.test(normalizedDescription)) {
+    return "Checking";
+  }
+
+  if (/w\/d .* to .* ck|internet transfer to .* ck/.test(normalizedDescription)) {
+    return "Savings";
+  }
+
+  if (/\bck\b|\bchecking\b/.test(normalizedDescription)) {
+    return "Checking";
+  }
+
+  if (/\bsav\b|\bsavings\b/.test(normalizedDescription)) {
+    return "Savings";
+  }
+
+  if (normalizedDescription.startsWith("w/d") || normalizedDescription.startsWith("ext w/d")) {
+    return "Checking";
+  }
+
+  if (normalizedDescription.startsWith("ext deposit")) {
+    return "Checking";
+  }
+
+  return "Unknown";
+}
+
 function inferCategory(description, amount) {
   const normalized = description.toLowerCase();
+
+  if (looksLikeTransferDescription(normalized)) {
+    return "Savings Transfer";
+  }
+
   for (const rule of CATEGORY_RULES) {
     if (rule.keywords.some((keyword) => normalized.includes(keyword))) {
       return rule.category;
@@ -730,24 +1294,49 @@ function renderBreakdown(container, items, scaleTotal) {
   }).join("");
 }
 
-function renderTransactions(transactions) {
-  els.transactionsBody.innerHTML = transactions.map((transaction) => {
+function renderTransactions(transactions, importMeta = currentImportMeta) {
+  let runningValue = importMeta.openingBalance ?? 0;
+  const showRunningBalance = importMeta?.openingBalance !== null;
+  const rows = [];
+
+  els.runningTotalHeader.textContent = showRunningBalance ? "Running Balance" : "Running Net";
+
+  if (importMeta?.openingBalance !== null) {
+    rows.push(`
+      <tr>
+        <td></td>
+        <td>${escapeHtml(importMeta.focusAccount || transactions[0]?.account || "Unknown")}</td>
+        <td>Starting Balance</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="${runningValue >= 0 ? "amount-income" : "amount-expense"}">${money(runningValue)}</td>
+      </tr>
+    `);
+  }
+
+  transactions.forEach((transaction) => {
+    runningValue += transaction.amount;
     const amountClass = transaction.type === "Income"
       ? "amount-income"
       : transaction.type === "Transfer"
         ? "amount-transfer"
         : "amount-expense";
 
-    return `
+    rows.push(`
       <tr>
         <td>${transaction.dateLabel}</td>
+        <td>${escapeHtml(transaction.account)}</td>
         <td>${escapeHtml(transaction.description)}</td>
         <td>${escapeHtml(transaction.category)}</td>
         <td><span class="type-chip">${transaction.type}</span></td>
         <td class="${amountClass}">${money(transaction.amount)}</td>
+        <td class="${runningValue >= 0 ? "amount-income" : "amount-expense"}">${money(runningValue)}</td>
       </tr>
-    `;
-  }).join("");
+    `);
+  });
+
+  els.transactionsBody.innerHTML = rows.join("");
 }
 
 function summaryCard(label, value, detail) {
