@@ -602,19 +602,17 @@ function extractStatementMeta(statementText, fileName = "") {
   const normalized = text.toLowerCase();
   const accountTypes = new Set();
 
-  if (normalized.includes("checking statement")) {
-    accountTypes.add("Checking");
-  }
-
-  if (normalized.includes("savings statement")) {
-    accountTypes.add("Savings");
-  }
-
-  if (normalized.includes("withdrawals, fees and other debits")) {
+  if (
+    normalized.includes("checking statement") ||
+    normalized.includes("beyond free checking") ||
+    normalized.includes("withdrawals, fees and other debits")
+  ) {
     accountTypes.add("Checking");
   }
 
   if (
+    normalized.includes("savings statement") ||
+    normalized.includes("primary share") ||
     normalized.includes("deposits, dividends and other credits") ||
     normalized.includes("dividend rate summary") ||
     normalized.includes("total dividends")
@@ -637,7 +635,9 @@ function extractStatementMeta(statementText, fileName = "") {
     openingBalances[account] = openingBalance;
   });
 
-  const selectedAccounts = accountList.slice();
+  const selectedAccounts = accountList.length > 1
+    ? (accountList.includes("Checking") ? ["Checking"] : [accountList[0]])
+    : accountList.slice();
 
   return applySelectedAccountsToImportMeta({
     openingBalance: null,
@@ -693,9 +693,16 @@ function extractFocusedStatementText(statementText, focusAccount) {
     .map((line) => line.trim())
     .filter(Boolean);
 
-  const focusHeader = focusAccount.toLowerCase() === "checking" ? "checking statement" : "savings statement";
-  const otherHeader = focusAccount.toLowerCase() === "checking" ? "savings statement" : "checking statement";
-  const focusStartIndex = lines.findIndex((line) => line.toLowerCase().includes(focusHeader));
+  const isChecking = focusAccount.toLowerCase() === "checking";
+  const focusHeaders = isChecking
+    ? ["checking statement", "beyond free checking"]
+    : ["savings statement", "primary share"];
+  const otherHeaders = isChecking
+    ? ["savings statement", "primary share"]
+    : ["checking statement", "beyond free checking"];
+  const focusStartIndex = lines.findIndex((line) =>
+    focusHeaders.some((h) => line.toLowerCase().includes(h))
+  );
 
   if (focusStartIndex === -1) {
     return "";
@@ -706,7 +713,7 @@ function extractFocusedStatementText(statementText, focusAccount) {
   for (let index = focusStartIndex; index < lines.length; index += 1) {
     const normalizedLine = lines[index].toLowerCase();
 
-    if (index > focusStartIndex && normalizedLine.includes(otherHeader)) {
+    if (index > focusStartIndex && otherHeaders.some((h) => normalizedLine.includes(h))) {
       break;
     }
 
@@ -742,11 +749,34 @@ function extractStatementYear(statementText, fileName = "") {
 function detectAccountFromLine(line) {
   const normalized = String(line || "").toLowerCase();
 
-  if (normalized.includes("checking statement")) {
+  const checkingPatterns = [
+    "checking statement",
+    "checking account",
+    "share draft",
+    "free checking",
+    "regular checking",
+    "interest checking",
+    "checking activity",
+    "beyond free checking"
+  ];
+
+  const savingsPatterns = [
+    "savings statement",
+    "savings account",
+    "regular shares",
+    "share savings",
+    "money market",
+    "savings activity",
+    "total dividends",
+    "dividend rate summary",
+    "primary share"
+  ];
+
+  if (checkingPatterns.some((p) => normalized.includes(p))) {
     return "Checking";
   }
 
-  if (normalized.includes("savings statement")) {
+  if (savingsPatterns.some((p) => normalized.includes(p))) {
     return "Savings";
   }
 
@@ -805,6 +835,7 @@ function extractOpeningBalanceByAccountContext(statementText, focusAccount) {
   const preferredMarkers = focusAccount === "Checking"
     ? [
       "checking statement",
+      "beyond free checking",
       "withdrawals, fees and other debits",
       "checks cleared",
       "w/d ",
@@ -813,10 +844,10 @@ function extractOpeningBalanceByAccountContext(statementText, focusAccount) {
       "ach debit",
       "debit card"
     ]
-    : ["savings statement", "dividend rate summary", "total dividends", "deposits, dividends and other credits"];
+    : ["savings statement", "primary share", "dividend rate summary", "total dividends", "deposits, dividends and other credits"];
   const opposingMarkers = focusAccount === "Checking"
-    ? ["savings statement", "dividend rate summary", "total dividends", "deposits, dividends and other credits"]
-    : ["checking statement", "withdrawals, fees and other debits", "checks cleared"];
+    ? ["savings statement", "primary share", "dividend rate summary", "total dividends", "deposits, dividends and other credits"]
+    : ["checking statement", "beyond free checking", "withdrawals, fees and other debits", "checks cleared"];
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
@@ -924,11 +955,16 @@ function shouldIncludeTransaction(transaction, importMeta) {
     return true;
   }
 
+  // On multi-account statements, "Unknown" transactions are ambiguous — don't include them
+  // when filtering, as they may belong to the unselected account.
+  const isMultiAccount = hasMultipleAccountTypes(importMeta);
+  const includeUnknown = !isMultiAccount;
+
   if (selectedAccounts.length === 1) {
-    return transaction.account === selectedAccounts[0] || transaction.account === "Unknown";
+    return transaction.account === selectedAccounts[0] || (includeUnknown && transaction.account === "Unknown");
   }
 
-  return selectedAccounts.includes(transaction.account) || transaction.account === "Unknown";
+  return selectedAccounts.includes(transaction.account) || (includeUnknown && transaction.account === "Unknown");
 }
 
 function looksLikeSummaryGridLine(line, dateMatches, amountMatches) {
@@ -1063,6 +1099,16 @@ function parseCsv(csvText) {
   });
 }
 
+function parseLocalDate(dateText) {
+  // "2025-11-28" parsed by new Date() is treated as UTC midnight, which shifts
+  // back a day in negative-offset timezones. Parse as local noon instead.
+  const isoMatch = String(dateText || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) {
+    return new Date(Number(isoMatch[1]), Number(isoMatch[2]) - 1, Number(isoMatch[3]));
+  }
+  return new Date(dateText);
+}
+
 function normalizeTransaction(record) {
   const dateText = firstValue(record, ["date", "posteddate", "transactiondate"]);
   const rawAccount = firstValue(record, ["account"]);
@@ -1076,8 +1122,8 @@ function normalizeTransaction(record) {
     return null;
   }
 
-  const date = new Date(dateText);
-  if (Number.isNaN(date.valueOf())) {
+  const date = parseLocalDate(dateText);
+  if (!date || Number.isNaN(date.valueOf())) {
     return null;
   }
 
